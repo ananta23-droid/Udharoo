@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isShopOwner(shopId) {
+      return isAuthenticated() && 
+        (request.auth.uid == resource.data.ownerUid || 
+         request.auth.uid == request.resource.data.ownerUid ||
+         request.auth.uid == get(/databases/$(database)/documents/shops/$(shopId)).data.ownerUid);
+    }
+
+    function isShopStaff(shopId) {
+      return isAuthenticated() && (
+        isShopOwner(shopId) ||
+        exists(/databases/$(database)/documents/shops/$(shopId)/staff/$(request.auth.uid))
+      );
+    }
+
+    // Shops collection
+    match /shops/{shopId} {
+      allow read: if isAuthenticated() && (resource.data.ownerUid == request.auth.uid || isShopStaff(shopId));
+      allow create: if isAuthenticated() && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.ownerUid == request.auth.uid && request.resource.data.ownerUid == request.auth.uid;
+      allow delete: if false; // Audit preservation
+    }
+
+    // Staff sub-collection
+    match /shops/{shopId}/staff/{staffId} {
+      allow read: if isShopStaff(shopId);
+      allow create, update: if isShopOwner(shopId);
+      allow delete: if false;
+    }
+
+    // Customers sub-collection: scoped strictly to shop
+    match /shops/{shopId}/customers/{customerId} {
+      allow read, write: if isShopStaff(shopId);
+    }
+
+    // Transactions sub-collection: append-only financial ledger
+    match /shops/{shopId}/transactions/{transactionId} {
+      allow read: if isShopStaff(shopId);
+      allow create: if isShopStaff(shopId) 
+        && request.resource.data.amountInPaisa is int
+        && request.resource.data.amountInPaisa > 0
+        && (request.resource.data.type == 'credit' || request.resource.data.type == 'payment');
+      allow update, delete: if false; // Strictly auditable immutable ledger
+    }
+
+    // Real-Time In-App Notification Center
+    match /shops/{shopId}/notifications/{notificationId} {
+      // Readable by authorized shop staff
+      allow read: if isShopStaff(shopId);
+      // Can be created by authorized staff or Cloud Functions
+      allow create: if isShopStaff(shopId);
+      // Can only update read status; financial transaction data is immutable
+      allow update: if isShopStaff(shopId) && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']);
+      // Allow dismiss/archive of notification
+      allow delete: if isShopStaff(shopId);
+    }
+
+    // Device Tokens for multi-device push delivery
+    match /shops/{shopId}/device_tokens/{tokenId} {
+      allow read: if isShopStaff(shopId);
+      // Authenticated staff can register or unregister their device token
+      allow write: if isShopStaff(shopId);
+    }
+
+    // Staff Notification Preferences
+    match /shops/{shopId}/preferences/{staffId} {
+      allow read: if isShopStaff(shopId);
+      allow write: if isShopStaff(shopId) && (request.auth.uid == staffId || isShopOwner(shopId));
+    }
+  }
+}
